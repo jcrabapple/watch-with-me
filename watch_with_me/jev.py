@@ -16,7 +16,10 @@ mode 0600 (``jev-api-key.json``, same convention as the Plex credentials),
 is never written to ``config.yaml``, never returned in an API payload (at
 most ``{"configured": true, "last4": "abcd"}``), and never logged. The
 ``TYPESAFE_API_KEY`` / ``OPENROUTER_API_KEY`` env vars are the alternative
-route; both are declared as optional env in plugin.yaml.
+route, and they are consulted only when the host is absent (standalone
+import): inside a gateway the host's secret scope is authoritative, because
+one gateway can serve several profiles. Both are declared as optional env in
+plugin.yaml. Provider base URLs are fixed constants, not overridable.
 """
 
 from __future__ import annotations
@@ -116,8 +119,7 @@ class Config:
         return TYPESAFE_PATH if self.provider == "typesafe" else OPENROUTER_PATH
 
 
-_ENV_NAMES = ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY",
-              "TYPESAFE_BASE_URL", "OPENROUTER_BASE_URL")
+_ENV_NAMES = ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY")
 
 
 def _env_view(env: Optional[Mapping[str, str]]) -> Mapping[str, str]:
@@ -127,32 +129,42 @@ def _env_view(env: Optional[Mapping[str, str]]) -> Mapping[str, str]:
     return {name: os.environ[name] for name in _ENV_NAMES if name in os.environ}
 
 
-def _resolve_env(name: str, env: Optional[Mapping[str, str]]) -> str:
-    """Read an env var the way the host keeps secrets (scope first, env fall
-    back). Never raises: a missing secret means 'no key', not an error."""
-    environ = _env_view(env)
+def _host_secret(name: str) -> Optional[str]:
+    """The host's scoped secret for ``name``, or None when no host is present.
+
+    ``None`` means the import failed, so this is a standalone process. An
+    empty string means the host is present and has no value for ``name`` --
+    callers must treat those two cases differently.
+    """
     try:
         from agent.secret_scope import get_secret  # type: ignore[import-not-found]
-
-        try:
-            scoped = str(get_secret(name, "") or "").strip()
-        except Exception:
-            scoped = ""
-        if scoped:
-            return scoped
     except ImportError:
-        pass
-    return (environ.get(name) or "").strip()
+        return None
+    try:
+        return str(get_secret(name, "") or "").strip()
+    except Exception:
+        return ""
 
 
-def _config_for(provider: str, key: str, model: str,
-                env: Optional[Mapping[str, str]]) -> Config:
-    environ = _env_view(env)
+def _resolve_env(name: str, env: Optional[Mapping[str, str]]) -> str:
+    """Read an API key: the host's secret scope when it exists, the process
+    environment only when it does not. Never raises.
+
+    One gateway can serve several profiles, so once ``agent.secret_scope``
+    imports its answer is final: falling back to ``os.environ`` there would
+    hand this plugin the launch profile's key.
+    """
+    scoped = _host_secret(name)
+    if scoped is not None:
+        return scoped
+    return (_env_view(env).get(name) or "").strip()
+
+
+def _config_for(provider: str, key: str, model: str) -> Config:
+    """The provider endpoints are fixed; they are not user-extensible."""
     if provider == "typesafe":
-        base = (environ.get("TYPESAFE_BASE_URL") or TYPESAFE_BASE_URL)
-        return Config(provider, key, model or TYPESAFE_MODEL, base.rstrip("/"))
-    base = (environ.get("OPENROUTER_BASE_URL") or OPENROUTER_BASE_URL)
-    return Config(provider, key, model or OPENROUTER_MODEL, base.rstrip("/"))
+        return Config(provider, key, model or TYPESAFE_MODEL, TYPESAFE_BASE_URL)
+    return Config(provider, key, model or OPENROUTER_MODEL, OPENROUTER_BASE_URL)
 
 
 def resolve(settings, *, env: Optional[Mapping[str, str]] = None) -> Config | None:
@@ -176,15 +188,15 @@ def resolve(settings, *, env: Optional[Mapping[str, str]] = None) -> Config | No
         key = explicit or _resolve_env(var, env)
         if not key:
             return None
-        return _config_for(provider, key, model, env)
+        return _config_for(provider, key, model)
     if explicit:
-        return _config_for("openrouter", explicit, model, env)
+        return _config_for("openrouter", explicit, model)
     key = _resolve_env("TYPESAFE_API_KEY", env)
     if key:
-        return _config_for("typesafe", key, model, env)
+        return _config_for("typesafe", key, model)
     key = _resolve_env("OPENROUTER_API_KEY", env)
     if key:
-        return _config_for("openrouter", key, model, env)
+        return _config_for("openrouter", key, model)
     return None
 
 

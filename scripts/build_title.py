@@ -40,14 +40,15 @@ OPENROUTER = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def _api_key() -> str:
-    key = os.environ.get("OPENROUTER_API_KEY")
+    """The OpenRouter key from the process environment, and nothing else.
+
+    This script can be run inside an installed tree where one host serves
+    several profiles, so it never reads ``~/.hermes/.env`` (that file carries
+    the launch profile's key) and never guesses.
+    """
+    key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
     if key:
         return key
-    env_file = Path.home() / ".hermes" / ".env"
-    if env_file.exists():
-        for line in env_file.read_text("utf-8", errors="replace").splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
     raise SystemExit("OPENROUTER_API_KEY is not set")
 
 

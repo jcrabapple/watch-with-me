@@ -47,6 +47,23 @@ def data_dir(tmp_path, monkeypatch):
     return target
 
 
+@pytest.fixture
+def standalone(monkeypatch):
+    """Simulate a process with no host: ``agent.secret_scope`` unimportable."""
+    monkeypatch.setattr(jev, "_host_secret", lambda name: None)
+
+
+@pytest.fixture
+def host_scope(monkeypatch):
+    """Simulate the gateway: the host's secret scope answers, and its answer is
+    the only one that counts."""
+    def scope(name, value=""):
+        monkeypatch.setattr(jev, "_host_secret",
+                            lambda n: (value if n == name else ""))
+    return scope
+
+
+
 def answer_payload(choice: str, probabilities: dict) -> bytes:
     return json.dumps({
         "id": "req_1", "model": "typesafe/jev-1.13", "provider": "openrouter",
@@ -149,7 +166,7 @@ def test_auto_explicit_key_can_target_typesafe(data_dir):
     assert config.path == jev.TYPESAFE_PATH
 
 
-def test_auto_picks_typesafe_env_then_openrouter_env(data_dir, monkeypatch):
+def test_auto_picks_typesafe_env_then_openrouter_env(data_dir, monkeypatch, standalone):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("TYPESAFE_API_KEY", "sk-typesafe-env")
     config = jev.resolve(Settings(jev_enabled=True), env=os.environ)
@@ -163,12 +180,39 @@ def test_auto_picks_typesafe_env_then_openrouter_env(data_dir, monkeypatch):
         and config.api_key == "sk-openrouter-env"
 
 
-def test_explicit_provider_uses_its_own_env_var(data_dir, monkeypatch):
+def test_explicit_provider_uses_its_own_env_var(data_dir, monkeypatch, standalone):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-openrouter-env")
     settings = Settings(jev_enabled=True, jev_provider="typesafe")
     config = jev.resolve(settings, env=os.environ)
     assert config is None  # typesafe chosen, typesafe env absent: disabled
+
+
+def test_gateway_scope_answer_is_final_even_when_empty(data_dir, monkeypatch, host_scope):
+    """No env fallback in the gateway: the launch profile's key must not leak."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-launch-profile")
+    host_scope("OPENROUTER_API_KEY", "")
+    assert jev.resolve(Settings(jev_enabled=True), env=os.environ) is None
+
+
+def test_gateway_scoped_key_beats_launch_env(data_dir, monkeypatch, host_scope):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-launch-profile")
+    host_scope("OPENROUTER_API_KEY", "sk-scoped")
+    config = jev.resolve(Settings(jev_enabled=True), env=os.environ)
+    assert config is not None
+    assert config.api_key == "sk-scoped"
+
+
+def test_host_secret_returns_none_without_a_host(monkeypatch):
+    """``None`` (standalone) and ``""`` (host has no value) are different."""
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", None)
+    assert jev._host_secret("OPENROUTER_API_KEY") is None
+
+
+def test_base_urls_are_not_env_overridable(data_dir, standalone, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "http://127.0.0.1:9")
+    config = jev.resolve(enabled_settings(), env=os.environ)
+    assert config.base_url == jev.OPENROUTER_BASE_URL
 
 
 def test_model_default_and_override(data_dir):

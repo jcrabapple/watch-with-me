@@ -12,6 +12,23 @@ from watch_with_me import models  # noqa: E402
 from watch_with_me.config import Settings  # noqa: E402
 
 
+def test_api_key_comes_from_the_process_env_only(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-from-env")
+    assert build_title._api_key() == "sk-from-env"
+
+
+def test_api_key_never_reads_the_host_env_file(tmp_path, monkeypatch):
+    """A shared host's ~/.hermes/.env holds the LAUNCH profile's key; a script
+    inside the installed tree must never pick it up."""
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True)
+    (home / ".hermes" / ".env").write_text("OPENROUTER_API_KEY=sk-launch-profile\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(SystemExit):
+        build_title._api_key()
+
+
 def test_episode_metadata_queries_the_series_name():
     metadata = {"type": "episode", "title": "A Bad Lie", "grandparentTitle": "Elsbeth",
                 "year": 2025}
