@@ -1,0 +1,26 @@
+manifest_version: 2
+name: watch-with-me
+version: "1.0.0"
+description: "Follows Plex playback and publishes sourced film trivia near the current scene."
+kind: standalone
+requires_hermes: ">=0.22.6"
+author: Jason Crabtree
+provides_tools:
+  - watch_with_me_status
+  - watch_with_me_start
+  - watch_with_me_stop
+  - watch_with_me_now
+# Optional entity selection (Jev). Neither var is needed for anything: with
+# no key and jev_enabled off (the default) the plugin installs, registers,
+# tests, and builds exactly as it always has. Declared optional so the
+# installer never prompts for them; the dashboard API offers a write-only
+# key field as an alternative to these env vars.
+optional_env:
+  - name: TYPESAFE_API_KEY
+    description: "Optional: TypeSafe key for Jev entity selection (jev_provider=typesafe)"
+    url: "https://typesafe.ai/"
+    password: true
+  - name: OPENROUTER_API_KEY
+    description: "Optional: OpenRouter key for Jev entity selection (typesafe/jev-1.13)"
+    url: "https://openrouter.ai/keys"
+    password: true

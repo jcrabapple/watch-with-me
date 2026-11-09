@@ -1,0 +1,8 @@
+{
+  "name": "watch-with-me",
+  "label": "Watch With Me",
+  "description": "Live film trivia streamed in sync with Plex playback.",
+  "version": "0.1.0",
+  "tab": { "hidden": true },
+  "api": "plugin_api.py"
+}
