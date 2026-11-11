@@ -337,7 +337,7 @@ def register(ctx) -> None:
                          description="Watch With Me: status|start|stop|now|setup",
                          args_hint="status|start|stop|now|setup")
 
-    settings = Settings.from_dict(ctx.get_config("settings", {}) or {})
+    settings = Settings.from_dict(models.live_plugin_settings())
     # No full snapshot into runtime_state: the watcher and the dashboard API
     # read the LIVE host config (Settings → Plugins) on every poll and merge
     # the sparse overlay on top, so a settings edit lands without a reload
