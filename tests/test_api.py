@@ -52,6 +52,33 @@ def test_static_assets_are_served(api):
     assert "text/css" in css.headers["content-type"]
 
 
+def test_poster_endpoint_proxies_image_and_rejects_bad_keys(api, tmp_path, monkeypatch):
+    from watch_with_me import onboarding as onboarding_mod
+
+    monkeypatch.setattr(store, "data_dir", lambda: tmp_path)
+    onboarding_mod.save_credentials(
+        base_url="http://192.168.1.20:32400", token="secret-tok", client_id="cid-9",
+        server_name="NAS", machine_id="mach-1",
+        path=tmp_path / "plex-credentials.json")
+
+    class PosterClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def poster(self, rating_key):
+            return (b"\xff\xd8\xff\xe0" + b"0" * 20, "image/jpeg") if rating_key == "64341" else None
+
+    module, client = api
+    monkeypatch.setattr(module, "PlexClient", PosterClient)
+    bad = client.get("/api/plugins/watch-with-me/poster/not-a-number")
+    assert bad.status_code == 400
+    ok = client.get("/api/plugins/watch-with-me/poster/64341")
+    assert ok.status_code == 200
+    assert ok.headers["content-type"] == "image/jpeg"
+    assert ok.content.startswith(b"\xff\xd8")
+    assert b"secret-tok" not in ok.content
+
+
 def test_idle_session_has_no_media(api):
     _, client = api
     body = client.get("/api/plugins/watch-with-me/session").json()

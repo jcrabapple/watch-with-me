@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -132,6 +132,38 @@ async def app_css() -> FileResponse:
 @router.get("/session")
 async def session() -> JSONResponse:
     return JSONResponse(_session_payload(store.latest_session(_db())))
+
+
+_poster_cache: dict[str, tuple[bytes, str]] = {}
+
+
+@router.get("/poster/{rating_key}")
+async def poster(rating_key: str) -> Response:
+    """Proxied poster artwork for the header; token never reaches the browser."""
+    key = str(rating_key or "").strip()
+    if not key.isdigit():
+        raise HTTPException(status_code=400, detail="invalid rating_key")
+    cached = _poster_cache.get(key)
+    if cached is None:
+        creds = onboarding.load_credentials()
+        if not creds:
+            raise HTTPException(status_code=404, detail="Plex is not linked")
+        client = PlexClient(
+            creds["base_url"], creds["token"],
+            creds.get("client_id", "watch-with-me"),
+            allow_loopback=_settings().allow_loopback_plex,
+            timeout=6.0,
+        )
+        cached = client.poster(key)
+        if cached is not None:
+            if len(_poster_cache) >= 64:
+                _poster_cache.pop(next(iter(_poster_cache)))
+            _poster_cache[key] = cached
+    if cached is None:
+        raise HTTPException(status_code=404, detail="poster unavailable")
+    data, mime = cached
+    return Response(content=data, media_type=mime,
+                    headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.get("/credits")

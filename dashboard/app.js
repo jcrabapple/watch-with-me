@@ -38,6 +38,8 @@ const els = {
   setupStart: document.getElementById('setup-start'),
   setupCancel: document.getElementById('setup-cancel'),
   setupRelink: document.getElementById('setup-relink'),
+  drawer: document.getElementById('drawer'),
+  drawerSummary: document.getElementById('drawer-summary'),
 };
 
 const MODEL_SOURCE_LABELS = {
@@ -52,6 +54,7 @@ const state = {
   lastId: null,
   sessionId: null,
   ratingKey: null,
+  posterKey: null,
   following: true,
   wakeLock: null,
   timer: null,
@@ -60,6 +63,7 @@ const state = {
   ask: { id: null, timer: null, phase: 'idle', body: null },
   noteDisplay: 'live',
   pauseRevealed: false,
+  drawerTouched: false,
 };
 
 function api(path, options) {
@@ -175,6 +179,19 @@ els.pending.addEventListener('click', () => {
   revealPending().catch(() => {});
 });
 
+function renderPoster(ratingKey) {
+  const key = ratingKey ? String(ratingKey) : null;
+  if (key === state.posterKey) return;
+  state.posterKey = key;
+  els.poster.replaceChildren();
+  if (!key) return;
+  const img = document.createElement('img');
+  img.src = 'poster/' + encodeURIComponent(key);
+  img.alt = '';
+  img.addEventListener('error', () => { img.remove(); });
+  els.poster.appendChild(img);
+}
+
 function renderSession(session) {
   if (!session || session.state === 'idle') {
     els.title.textContent = 'Nothing playing';
@@ -183,9 +200,13 @@ function renderSession(session) {
     els.progressbar.style.width = '0%';
     els.ask.hidden = true;
     els.pending.hidden = true;
+    renderPoster(null);
+    if (els.drawer && !state.drawerTouched) els.drawer.open = true;
     return;
   }
   const media = session.media || {};
+  renderPoster(media.rating_key);
+  if (els.drawer && !state.drawerTouched) els.drawer.open = false;
   els.title.textContent = media.title || 'Unknown title';
   const parts = [];
   if (session.state) parts.push(session.state);
@@ -590,6 +611,11 @@ function renderAskResult() {
     const text = document.createElement('p');
     text.textContent = body.answer;
     card.appendChild(text);
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'ask-dismiss';
+    dismiss.textContent = 'Dismiss';
+    dismiss.addEventListener('click', () => { askSetPhase('idle', null); });
     const sources = (body.sources || []).filter((s) => s && s.source_url);
     if (sources.length) {
       const line = document.createElement('p');
@@ -606,6 +632,7 @@ function renderAskResult() {
       });
       card.appendChild(line);
     }
+    card.appendChild(dismiss);
     els.askResult.appendChild(card);
     els.askResult.hidden = false;
   } else if (state.ask.phase === 'nothing') {
@@ -770,6 +797,12 @@ document.addEventListener('visibilitychange', () => {
     loadSetup();
   }
 });
+
+if (els.drawerSummary) {
+  els.drawerSummary.addEventListener('click', () => {
+    state.drawerTouched = true;
+  });
+}
 
 loadSettings();
 loadSetup();

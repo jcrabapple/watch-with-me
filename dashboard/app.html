@@ -26,40 +26,45 @@
 
   <main id="stream" aria-live="polite" aria-relevant="additions"></main>
 
-  <section id="settings" aria-label="Model settings">
-    <p id="model-line">Notes model: …</p>
-    <p id="jev-line">Optional: use a decision model to choose which entities are worth expanding</p>
-  </section>
+  <details id="drawer">
+    <summary id="drawer-summary">Setup &amp; settings</summary>
+    <div id="drawer-body">
+      <section id="settings" aria-label="Model settings">
+        <p id="model-line">Notes model: …</p>
+        <p id="jev-line">Optional: use a decision model to choose which entities are worth expanding</p>
+      </section>
 
-  <section id="setup" aria-label="Plex setup">
-    <div id="setup-idle" hidden>
-      <p class="setup-line">Link your Plex account to get started.</p>
-      <button id="setup-start" type="button">Link Plex account</button>
+      <section id="setup" aria-label="Plex setup">
+        <div id="setup-idle" hidden>
+          <p class="setup-line">Link your Plex account to get started.</p>
+          <button id="setup-start" type="button">Link Plex account</button>
+        </div>
+        <div id="setup-pin" hidden>
+          <p class="setup-line">Enter this code at <a id="setup-link" href="https://plex.tv/link"
+             target="_blank" rel="noopener noreferrer">plex.tv/link</a>:</p>
+          <p id="setup-code" aria-label="Link code">····</p>
+          <p id="setup-status" class="setup-line">Waiting for you to link…</p>
+          <button id="setup-cancel" type="button">Cancel</button>
+        </div>
+        <div id="setup-linked" hidden>
+          <p id="setup-server-line" class="setup-line"></p>
+          <p id="setup-library-line" class="setup-line"></p>
+          <p id="setup-readiness-line" class="setup-line"></p>
+          <div id="setup-subtitles" hidden>
+            <p id="setup-subtitles-help" class="setup-line setup-help"></p>
+            <ul id="setup-subtitles-items" class="setup-items"></ul>
+            <p id="setup-subtitles-result" class="setup-line" hidden></p>
+          </div>
+          <div id="setup-queue" hidden>
+            <p id="setup-queue-line" class="setup-line"></p>
+            <ul id="setup-queue-items" class="setup-items"></ul>
+          </div>
+          <button id="setup-relink" type="button">Relink</button>
+        </div>
+        <p id="setup-error" class="setup-line setup-error" hidden></p>
+      </section>
     </div>
-    <div id="setup-pin" hidden>
-      <p class="setup-line">Enter this code at <a id="setup-link" href="https://plex.tv/link"
-         target="_blank" rel="noopener noreferrer">plex.tv/link</a>:</p>
-      <p id="setup-code" aria-label="Link code">····</p>
-      <p id="setup-status" class="setup-line">Waiting for you to link…</p>
-      <button id="setup-cancel" type="button">Cancel</button>
-    </div>
-    <div id="setup-linked" hidden>
-      <p id="setup-server-line" class="setup-line"></p>
-      <p id="setup-library-line" class="setup-line"></p>
-      <p id="setup-readiness-line" class="setup-line"></p>
-      <div id="setup-subtitles" hidden>
-        <p id="setup-subtitles-help" class="setup-line setup-help"></p>
-        <ul id="setup-subtitles-items" class="setup-items"></ul>
-        <p id="setup-subtitles-result" class="setup-line" hidden></p>
-      </div>
-      <div id="setup-queue" hidden>
-        <p id="setup-queue-line" class="setup-line"></p>
-        <ul id="setup-queue-items" class="setup-items"></ul>
-      </div>
-      <button id="setup-relink" type="button">Relink</button>
-    </div>
-    <p id="setup-error" class="setup-line setup-error" hidden></p>
-  </section>
+  </details>
 
   <div id="jump" hidden><button type="button">Jump to live</button></div>
 

@@ -230,6 +230,35 @@ class PlexClient:
                 return data, mime
         return None
 
+    def poster(self, rating_key: str, width: int = 160,
+               height: int = 240) -> tuple[bytes, str] | None:
+        """Poster art for an item (show/season poster for episodes), or None.
+
+        Proxied through the photo transcoder so multi-megabyte posters arrive
+        as ~10 KB thumbnails and the Plex token never leaves the server.
+        """
+        try:
+            md = self.metadata(rating_key)
+        except PlexError:
+            md = {}
+        thumb = (md.get("grandparentThumb") or md.get("parentThumb")
+                 or md.get("thumb") or f"/library/metadata/{rating_key}/thumb")
+        quoted = urllib.parse.quote(thumb, safe="")
+        paths = (
+            f"/photo/:/transcode?url={quoted}&width={int(width)}&height={int(height)}"
+            "&minSize=1&upscale=0",
+            thumb,
+        )
+        for path in paths:
+            try:
+                data = self._get(path, accept="image/jpeg", raw=True)
+            except PlexError:
+                continue
+            mime = _sniff_image_mime(data)
+            if mime:
+                return data, mime
+        return None
+
     def recently_added(self, limit: int = 10) -> list[dict]:
         """The most recent items across all libraries, newest first."""
         payload = self._get("/library/recentlyAdded")

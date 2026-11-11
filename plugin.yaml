@@ -1,6 +1,6 @@
 manifest_version: 2
 name: watch-with-me
-version: "1.0.1"
+version: "1.0.2"
 description: "Follows Plex playback and publishes sourced film trivia near the current scene."
 kind: standalone
 requires_hermes: ">=0.22.6"
