@@ -37,6 +37,33 @@ Hermes the environment is never consulted.
 The dashboard page's settings area always shows the resolved model (or "not
 configured"), its source, and one sentence of guidance.
 
+## The dashboard page
+
+Open the **Watch With Me** tab in the Hermes Dashboard sidebar: it renders
+the plugin page, shows what your Plex server is playing, and carries the
+settings drawer, the Plex link flow, and the note feed. On a phone, use the
+LAN link the page offers (or set `public_base_url` to an `http(s)://` URL
+you reach from outside the network). Everything below can be done from that
+page; the terminal is only needed for the chat-handoff snippet.
+
+## Chat handoff (optional)
+
+If you want playback start to drop the companion link into the chat session
+that started the watcher, grant the host capability and enable the setting:
+
+```yaml
+plugins:
+  entries:
+    watch-with-me:
+      allow_gateway_injection: true   # host capability, config.yaml only
+      settings:
+        chat_notifications: true
+```
+
+`allow_gateway_injection` cannot be set from the UI; it must be granted in
+`config.yaml`. The page's settings area shows whether both halves are in
+effect (Settings → Plugins → Watch With Me will tell you the same).
+
 ## Choosing when notes appear
 
 The `note_display` setting controls when the page shows notes: `live`

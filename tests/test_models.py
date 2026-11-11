@@ -23,6 +23,31 @@ def cfg(*, aux=None, inherit=None, override=None):
     return config
 
 
+class TestConfigSchemaDefaults:
+    def test_plugin_yaml_defaults_match_settings_defaults(self):
+        """Every config_schema default must equal the Settings() default.
+
+        The host renders config_schema defaults in Settings → Plugins and
+        merges saved values over them; a mismatch means the UI shows one
+        thing while the watcher applies another."""
+        from pathlib import Path
+
+        import yaml
+
+        root = Path(__file__).resolve().parent.parent
+        schema = yaml.safe_load(
+            (root / "plugin.yaml").read_text("utf-8"))["config_schema"]
+        defaults = Settings()
+        assert schema, "plugin.yaml carries no config_schema"
+        for key, spec in schema.items():
+            assert hasattr(defaults, key), \
+                f"config_schema key {key!r} does not exist on Settings"
+            assert "default" in spec, f"config_schema key {key!r} has no default"
+            assert spec["default"] == getattr(defaults, key), (
+                f"config_schema default for {key!r} ({spec['default']!r}) != "
+                f"Settings default ({getattr(defaults, key)!r})")
+
+
 class TestSettingsFields:
     def test_new_fields_have_documented_defaults(self):
         settings = Settings()

@@ -40,6 +40,42 @@ link your Plex account with the four-digit code it shows at
 <https://plex.tv/link>. The plugin discovers your servers, probes each
 advertised connection, and verifies your library before saving anything.
 
+## Zero-terminal setup
+
+Everything above is terminal-optional. The whole flow runs from the UI:
+
+1. **Configure in Settings.** All 13 settings are native controls in
+   **Hermes Settings → Plugins → Watch With Me** (`config_schema`). Edits
+   there take effect on the watcher's next poll, no restart.
+2. **Open the page.** The **Watch With Me** tab in the Hermes Dashboard
+   sidebar renders the plugin page. On a phone, scan or copy the LAN link
+   the page shows (it appears once the plugin has discovered your network
+   address).
+3. **Link Plex from the page.** Press **Link Plex account**, enter the
+   four-digit code at <https://plex.tv/link>. Your account username and
+   display title are both recorded, so Plex Home users whose
+   `User.title != username` are still auto-authorized when
+   `allowed_user_ids` is empty.
+4. **Claim a stream with one tap.** The page banner shows what is playing
+   ("*Title* is playing on *Player*") and a **Watch this stream** button
+   claims it on the spot; the watcher adopts the claim on its next poll.
+5. **Chat handoff (optional).** With the snippet below, playback start
+   also drops the companion link into the chat session that started the
+   watcher:
+
+```yaml
+plugins:
+  entries:
+    watch-with-me:
+      allow_gateway_injection: true   # host capability, config.yaml only
+      settings:
+        chat_notifications: true
+```
+
+`allow_gateway_injection` is a host capability that can only be granted in
+`config.yaml`; the plugin settings area shows whether it is in effect. The
+companion link is never printed to a log.
+
 ## Where the transcript comes from
 
 Notes need text. In order of preference:
@@ -100,6 +136,8 @@ and stored at mode 0600; it is never returned by the API or written to a log.
 | `prepare_budget_titles_per_day` | `3` | Daily cap on background builds. |
 | `download_subtitles` | `false` | Let Plex fetch subtitles into your library. Needs Plex Pass. |
 | `allowed_user_ids` / `allowed_player_ids` | empty | Keep notes to your own streams on a shared server. |
+| `chat_notifications` | `false` | Send the companion link to chat on playback start (needs `allow_gateway_injection`). |
+| `public_base_url` | empty | Override the link the page shows; must be `http(s)://`, otherwise LAN discovery is used. |
 | `jev_enabled` / `jev_api_key` | `false` / empty | Optional entity selection. The key is write-only. |
 
 ### Note display modes
@@ -130,7 +168,7 @@ The end-of-session digest is unchanged in every mode.
 ## Development
 
 ```bash
-python -m pytest -q                       # 410 tests
+python -m pytest -q                       # 474 tests
 python scripts/build_title.py --rating-key <key> --out notes.json
 python scripts/run_watcher.py             # the poll loop, standalone
 ```

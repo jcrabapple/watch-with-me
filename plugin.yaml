@@ -1,6 +1,6 @@
 manifest_version: 2
 name: watch-with-me
-version: "1.0.2"
+version: "1.1.0"
 description: "Follows Plex playback and publishes sourced film trivia near the current scene."
 kind: standalone
 requires_hermes: ">=0.22.6"
@@ -24,3 +24,78 @@ optional_env:
     description: "Optional: OpenRouter key for Jev entity selection (typesafe/jev-1.13)"
     url: "https://openrouter.ai/keys"
     password: true
+
+# User-tunable settings rendered natively by Hermes Desktop / Web Dashboard
+# (Settings → Plugins → Watch With Me). Saved values land in
+# plugins.entries.watch-with-me.settings and are merged over these defaults by
+# the watcher on every poll, so an edit takes effect without a restart.
+config_schema:
+  note_display:
+    type: str
+    choices: ["live", "pause", "both"]
+    default: "live"
+    label: "Note display mode"
+    description: "When notes appear: live as spoken, held until pause (Pause Reel), or both."
+  session_start:
+    type: str
+    choices: ["auto", "ask", "manual"]
+    default: "auto"
+    label: "Session start mode"
+    description: "auto claims after dwell; ask notifies in chat first; manual waits for /watch start or the page button."
+  prepare_depth:
+    type: str
+    choices: ["off", "next", "two", "queue"]
+    default: "off"
+    label: "Continue Watching preparation depth"
+    description: "Pre-build note timelines while idle so playback starts with notes ready."
+  prepare_budget_titles_per_day:
+    type: int
+    default: 3
+    label: "Daily preparation budget (titles/day)"
+    description: "Maximum background title builds per day."
+  download_subtitles:
+    type: bool
+    default: false
+    label: "Download missing subtitles via Plex"
+    description: "Opt-in: use Plex subtitle search (requires Plex Pass) when a title has no sidecar subtitle."
+  rewatch:
+    type: bool
+    default: false
+    label: "Claim rewatches"
+    description: "Auto-claim titles you have already watched in Plex (viewCount > 0)."
+  chat_notifications:
+    type: bool
+    default: false
+    label: "Send session link to chat"
+    description: "Send a message with the companion URL when playback starts (requires allow_gateway_injection)."
+  public_base_url:
+    type: str
+    default: ""
+    label: "Companion base URL override"
+    description: "Optional http(s)://host:port base URL used in chat links (auto-detected on LAN when empty)."
+  extract_command:
+    type: str
+    default: ""
+    label: "Embedded subtitle extract command"
+    description: "Optional command template ({media_path}, {stream_id}, {output}) to extract embedded subtitles."
+  allowed_user_ids:
+    type: list
+    default: []
+    label: "Allowed Plex usernames"
+    description: "Plex usernames eligible for auto-claim (defaults to your linked Plex account when empty)."
+  allowed_player_ids:
+    type: list
+    default: []
+    label: "Allowed Plex players"
+    description: "Player names or machineIdentifiers eligible for auto-claim (empty = any player on your account)."
+  jev_enabled:
+    type: bool
+    default: false
+    label: "Use Jev for entity selection"
+    description: "Optional: use a decision model to choose which mentioned entities are worth expanding."
+  jev_provider:
+    type: str
+    choices: ["auto", "typesafe", "openrouter"]
+    default: "auto"
+    label: "Jev provider"
+    description: "Provider for optional Jev entity selection."

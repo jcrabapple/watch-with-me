@@ -17,6 +17,11 @@
   </header>
   <div id="progress" aria-hidden="true"><div id="progressbar"></div></div>
 
+  <section id="claim-banner" hidden>
+    <p id="claim-text"></p>
+    <button id="claim-button" type="button">Watch this stream</button>
+  </section>
+
   <section id="ask" aria-label="Ask the Projectionist" hidden>
     <button id="ask-button" type="button">What did I just see?</button>
     <div id="ask-result" role="status" hidden></div>
@@ -32,6 +37,13 @@
       <section id="settings" aria-label="Model settings">
         <p id="model-line">Notes model: …</p>
         <p id="jev-line">Optional: use a decision model to choose which entities are worth expanding</p>
+        <p id="chat-line" class="setup-help"></p>
+        <div id="mode-picker" role="group" aria-label="Note display">
+          <span class="mode-label">Note display</span>
+          <button type="button" class="mode-pill" data-mode="live">Live</button>
+          <button type="button" class="mode-pill" data-mode="pause">Pause Reel</button>
+          <button type="button" class="mode-pill" data-mode="both">Both</button>
+        </div>
       </section>
 
       <section id="setup" aria-label="Plex setup">
@@ -50,6 +62,11 @@
           <p id="setup-server-line" class="setup-line"></p>
           <p id="setup-library-line" class="setup-line"></p>
           <p id="setup-readiness-line" class="setup-line"></p>
+          <p id="setup-phone-line" class="setup-line" hidden>
+            Phone / LAN link:
+            <a id="setup-phone-url" href="#" target="_blank" rel="noopener noreferrer"></a>
+            <button id="setup-phone-copy" type="button">Copy link</button>
+          </p>
           <div id="setup-subtitles" hidden>
             <p id="setup-subtitles-help" class="setup-line setup-help"></p>
             <ul id="setup-subtitles-items" class="setup-items"></ul>

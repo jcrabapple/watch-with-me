@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 PLEX_TV = "https://plex.tv"
 LINK_URL = "https://plex.tv/link"
 PRODUCT = "watch-with-me"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 CREDENTIALS = "plex-credentials.json"
 CLIENT_ID_FILE = "plex-client-id"
@@ -120,20 +120,32 @@ def credentials_path() -> Path:
 
 def save_credentials(*, base_url: str, token: str, client_id: str,
                      server_name: str = "", machine_id: str = "",
+                     username: str = "", account_title: str = "",
                      path: Path | None = None) -> Path:
     """Write the credentials file (mode 0600). The single writer for the file.
 
     ``relink`` is just this function again: the file is replaced wholesale.
+    ``username`` is the linked Plex account's username, captured during the
+    PIN link flow; it is persisted only when known, so files written by older
+    versions (and callers that never pass it) keep their exact shape.
+    ``account_title`` is the Plex display title (``User.title`` on sessions);
+    Plex Home users may differ from the username, so both are stored and both
+    authorize when they differ.
     """
     target = path or credentials_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({
+    body = {
         "base_url": base_url,
         "token": token,
         "client_id": client_id,
         "server_name": server_name,
         "machine_id": machine_id,
-    }), encoding="utf-8")
+    }
+    if username:
+        body["username"] = username
+    if account_title and account_title != username:
+        body["account_title"] = account_title
+    target.write_text(json.dumps(body), encoding="utf-8")
     os.chmod(target, 0o600)
     os.chmod(target.parent, 0o700)
     return target
@@ -192,6 +204,39 @@ def poll_pin_token(pin_id: str, client_id: str, *, transport=None,
 
 
 # -- step 2: server discovery ---------------------------------------------------
+
+def fetch_account_identity(token: str, client_id: str, *, transport=None) -> dict:
+    """The linked account's ``{"username", "title"}``; empty strings on failure.
+
+    Plex Home users often have a display title (what sessions report as
+    ``User.title``) that differs from the account username — both are
+    captured so zero-config authorization matches either. A transient
+    plex.tv failure must never abort linking, so every failure mode (HTTP
+    error, timeout, malformed payload) returns empties.
+    """
+    try:
+        payload = _http_json("GET", f"{PLEX_TV}/api/v2/user",
+                             headers=plex_tv_headers(client_id, token),
+                             timeout=10.0, transport=transport)
+    except Exception:  # noqa: BLE001 - the identity is an enhancement, never a gate
+        return {"username": "", "title": ""}
+    if not isinstance(payload, dict):
+        return {"username": "", "title": ""}
+    return {"username": str(payload.get("username") or ""),
+            "title": str(payload.get("title") or "")}
+
+
+def fetch_account_user(token: str, client_id: str, *, transport=None) -> str:
+    """The linked Plex account's username (or title); ``""`` on any failure.
+
+    Called right after the PIN link attaches a token so the watcher can treat
+    the account owner as eligible when ``allowed_user_ids`` is empty. A
+    transient plex.tv failure must never abort linking, so every failure
+    mode (HTTP error, timeout, malformed payload) returns ``""``.
+    """
+    identity = fetch_account_identity(token, client_id, transport=transport)
+    return identity["username"] or identity["title"]
+
 
 def fetch_resources(token: str, client_id: str, *, transport=None) -> list[dict]:
     payload = _http_json(

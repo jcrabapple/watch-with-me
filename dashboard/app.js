@@ -16,6 +16,10 @@ const els = {
   askButton: document.getElementById('ask-button'),
   askResult: document.getElementById('ask-result'),
   pending: document.getElementById('pending'),
+  claimBanner: document.getElementById('claim-banner'),
+  claimText: document.getElementById('claim-text'),
+  claimButton: document.getElementById('claim-button'),
+  modePills: Array.from(document.querySelectorAll('.mode-pill')),
   modelLine: document.getElementById('model-line'),
   jevLine: document.getElementById('jev-line'),
   setupIdle: document.getElementById('setup-idle'),
@@ -28,6 +32,9 @@ const els = {
   setupServerLine: document.getElementById('setup-server-line'),
   setupLibraryLine: document.getElementById('setup-library-line'),
   setupReadinessLine: document.getElementById('setup-readiness-line'),
+  setupPhoneLine: document.getElementById('setup-phone-line'),
+  setupPhoneUrl: document.getElementById('setup-phone-url'),
+  setupPhoneCopy: document.getElementById('setup-phone-copy'),
   setupSubtitles: document.getElementById('setup-subtitles'),
   setupSubtitlesHelp: document.getElementById('setup-subtitles-help'),
   setupSubtitlesItems: document.getElementById('setup-subtitles-items'),
@@ -40,6 +47,7 @@ const els = {
   setupRelink: document.getElementById('setup-relink'),
   drawer: document.getElementById('drawer'),
   drawerSummary: document.getElementById('drawer-summary'),
+  chatLine: document.getElementById('chat-line'),
 };
 
 const MODEL_SOURCE_LABELS = {
@@ -179,6 +187,61 @@ els.pending.addEventListener('click', () => {
   revealPending().catch(() => {});
 });
 
+function updateClaimBanner(session) {
+  const observed = session && session.state !== 'idle' && !session.claimed;
+  if (!observed) {
+    els.claimBanner.hidden = true;
+    return;
+  }
+  const media = session.media || {};
+  let text = (media.title || 'Something') + ' is playing on '
+    + (session.player || 'a Plex player');
+  if (session.degraded_reason) text += ' (' + session.degraded_reason + ')';
+  els.claimText.textContent = text;
+  els.claimBanner.hidden = false;
+}
+
+els.claimButton.addEventListener('click', () => {
+  els.claimButton.disabled = true;
+  api('session/claim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  }).then(() => {
+    els.claimBanner.hidden = true;
+    poll();
+  }).catch(() => {}).finally(() => {
+    // Never leave the button disabled: a failed POST must be retryable and a
+    // successful one hides the banner anyway.
+    els.claimButton.disabled = false;
+  });
+});
+
+// -- Note display mode picker (one-tap Live | Pause Reel | Both) -------------------
+
+function updateModePicker(mode) {
+  els.modePills.forEach((pill) => {
+    const active = pill.dataset.mode === mode;
+    pill.classList.toggle('active', active);
+    pill.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+els.modePills.forEach((pill) => {
+  pill.addEventListener('click', () => {
+    api('settings/mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note_display: pill.dataset.mode }),
+    }).then((payload) => {
+      state.noteDisplay = payload.note_display || pill.dataset.mode;
+      updateModePicker(state.noteDisplay);
+    }).catch(() => {});
+  });
+});
+
+updateModePicker(state.noteDisplay);
+
 function renderPoster(ratingKey) {
   const key = ratingKey ? String(ratingKey) : null;
   if (key === state.posterKey) return;
@@ -200,6 +263,7 @@ function renderSession(session) {
     els.progressbar.style.width = '0%';
     els.ask.hidden = true;
     els.pending.hidden = true;
+    updateClaimBanner(null);
     renderPoster(null);
     if (els.drawer && !state.drawerTouched) els.drawer.open = true;
     return;
@@ -217,6 +281,7 @@ function renderSession(session) {
   if (session.degraded_reason) parts.push(session.degraded_reason);
   els.subtitle.textContent = parts.join(' · ');
   els.status.textContent = session.claimed ? 'live' : 'observed';
+  updateClaimBanner(session);
   els.mute.textContent = session.muted ? 'Unmute' : 'Mute';
   els.ask.hidden = !(session.claimed && session.projectionist);
 
@@ -350,12 +415,31 @@ function renderJev(jev) {
   els.jevLine.textContent = 'Entity selection: Jev via ' + provider + key;
 }
 
+function renderChatState(chat) {
+  if (!chat) {
+    els.chatLine.textContent = '';
+    return;
+  }
+  if (chat.notifications_enabled && chat.gateway_injection_allowed) {
+    els.chatLine.textContent =
+      'Chat handoff: on — a playback start posts the companion link to your chat.';
+  } else if (chat.notifications_enabled) {
+    els.chatLine.textContent = ('Chat handoff: blocked — the host denies gateway '
+      + 'injection. Add "allow_gateway_injection: true" to the watch-with-me '
+      + 'entry in config.yaml and restart the gateway.');
+  } else {
+    els.chatLine.textContent = ('Chat handoff: off — enable "Send session link to '
+      + 'chat" under Settings → Plugins → Watch With Me.');
+  }
+}
+
 function renderSettings(payload) {
   const model = payload.model || 'not configured';
   const via = MODEL_SOURCE_LABELS[payload.model_source] || '';
   const source = via ? ' (via ' + via + ')' : '';
   els.modelLine.textContent = 'Notes model: ' + model + source + ' — ' + payload.guidance;
   renderJev(payload.jev);
+  renderChatState(payload.chat);
 }
 
 function loadSettings() {
@@ -414,6 +498,7 @@ function renderSetup(payload) {
     } else {
       els.setupReadinessLine.hidden = true;
     }
+    renderPhoneLink(server.companion_url);
     renderSubtitles(server);
   } else {
     showPane('idle');
@@ -425,6 +510,48 @@ function renderSetup(payload) {
     els.setupError.hidden = true;
   }
 }
+
+// -- Phone / LAN link --------------------------------------------------------------
+//
+// The setup payload carries server.companion_url once Plex is linked: the
+// resolved URL a phone on the same LAN can open. It is rendered, never
+// guessed client-side (the server knows its public_base_url override, its
+// LAN IPv4, and the request's scheme/port).
+
+function renderPhoneLink(url) {
+  // The URL is resolved server-side, but it can still be a bad override
+  // (see companion.py): only http(s) may become an href.
+  const safe = safeUrl(url);
+  if (!safe) {
+    els.setupPhoneLine.hidden = true;
+    return;
+  }
+  els.setupPhoneLine.hidden = false;
+  els.setupPhoneUrl.href = safe;
+  els.setupPhoneUrl.textContent = safe;
+}
+
+els.setupPhoneCopy.addEventListener('click', () => {
+  const url = els.setupPhoneUrl.getAttribute('href') || '';
+  if (!url || url === '#') return;
+  const done = () => {
+    els.setupPhoneCopy.textContent = 'Copied';
+    setTimeout(() => { els.setupPhoneCopy.textContent = 'Copy link'; }, 1500);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(done).catch(() => {});
+    return;
+  }
+  const area = document.createElement('textarea');
+  area.value = url;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  try { if (document.execCommand('copy')) done(); } catch (_) { /* no clipboard */ }
+  area.remove();
+});
 
 // States that can be fixed by downloading a text subtitle (the per-item action
 // below). Mirrors watch_with_me/subtitles.py and the RESEARCH-PREPARATION.md
@@ -698,6 +825,7 @@ function poll() {
     // mode; the mode decides whether this poll renders the live feed.
     return api('notes/pending/count').then((pending) => {
       state.noteDisplay = pending.note_display || 'live';
+      updateModePicker(state.noteDisplay);
       if (state.noteDisplay !== 'pause') {
         els.pending.hidden = true;
         state.pauseRevealed = false;

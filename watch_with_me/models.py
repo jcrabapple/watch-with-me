@@ -115,6 +115,33 @@ def plugin_settings(config: Mapping[str, Any]) -> dict:
     return {}
 
 
+def live_plugin_settings() -> dict:
+    """This plugin's saved settings from the LIVE host config.
+
+    Read on every watcher poll / API call so an edit under Hermes
+    Settings → Plugins lands without a gateway restart. Standalone (no host
+    config readable) this is ``{}`` and the plugin defaults apply.
+    """
+    try:
+        return plugin_settings(load_hermes_config())
+    except Exception:  # noqa: BLE001 - a config read glitch degrades to defaults
+        return {}
+
+
+def gateway_injection_allowed(config: Mapping[str, Any]) -> bool:
+    """Whether the host will deliver ``ctx.inject_message`` for this plugin.
+
+    The flag is the plugin-entry key ``allow_gateway_injection: true`` in
+    config.yaml (default false in the host), NOT a plugin setting — the
+    plugin cannot grant itself the capability, it can only surface the state.
+    """
+    try:
+        entry = config["plugins"]["entries"][PLUGIN_ID]
+        return isinstance(entry, Mapping) and entry.get("allow_gateway_injection") is True
+    except (KeyError, TypeError):
+        return False
+
+
 def _aux_model(entry: Any) -> str:
     """The model from an ``auxiliary.<task>`` config entry (dict or plain string)."""
     if isinstance(entry, str):

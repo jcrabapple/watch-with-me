@@ -1,8 +1,11 @@
 {
   "name": "watch-with-me",
   "label": "Watch With Me",
-  "description": "Live film trivia streamed in sync with Plex playback.",
-  "version": "0.1.0",
-  "tab": { "hidden": true },
+  "description": "Live, spoiler-safe film trivia synced to Plex playback.",
+  "icon": "Eye",
+  "version": "1.1.0",
+  "tab": { "path": "/watch-with-me", "position": "end" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
   "api": "plugin_api.py"
 }

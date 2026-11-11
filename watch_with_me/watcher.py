@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import json
 import logging
 import threading
 import time
 from pathlib import Path
 
 from . import onboarding
+from . import models
 from . import queue_prep
 from . import store
 from .config import Settings
@@ -25,6 +27,19 @@ log = logging.getLogger(__name__)
 
 HEARTBEAT = "watcher_heartbeat"
 CREDENTIALS = onboarding.CREDENTIALS
+
+#: Runtime settings overlay keys written by the dashboard UI. ``settings_json``
+#: in runtime_state holds ONLY these keys (sparse overrides); older builds
+#: stored a full startup snapshot there, which masked Settings → Plugins edits.
+UI_OVERLAY_KEYS = frozenset({
+    "allowed_user_ids", "allowed_player_ids", "note_display",
+    "rewatch", "prepare_depth", "public_base_url",
+})
+
+#: Notification dedup persistence: (session_id, rating_key, mode) triples,
+#: newest last, bounded to the most recent NOTIFIED_CLAIMS_MAX.
+NOTIFIED_CLAIMS_KEY = "notified_claims_json"
+NOTIFIED_CLAIMS_MAX = 50
 
 
 def credentials_path() -> Path:
@@ -39,7 +54,8 @@ def load_credentials() -> dict | None:
 
 class Watcher(threading.Thread):
     def __init__(self, settings: Settings | None = None, *,
-                 prepare_worker: queue_prep.PreparationWorker | None = None) -> None:
+                 prepare_worker: queue_prep.PreparationWorker | None = None,
+                 notify=None) -> None:
         super().__init__(name="watch-with-me-watcher", daemon=True)
         self.settings = settings or Settings()
         self.machine = SessionMachine(self.settings)
@@ -47,6 +63,13 @@ class Watcher(threading.Thread):
         # watcher knows when something plays; the worker decides when to
         # build. plugin.py constructs it (it needs the host LLM factory).
         self.prepare = prepare_worker
+        # Chat handoff callback (plugin.py builds it around ctx.inject_message).
+        # Fires at most once per (session_id, rating_key): on a new claim, or
+        # when a session enters candidate under session_start == "ask".
+        self.notify = notify
+        # Lazy-loaded from NOTIFIED_CLAIMS_KEY on first use so a watcher
+        # restart never re-notifies a session that already got its message.
+        self._notified: list[tuple[str, str, str]] | None = None
         self._had_sessions = False
         self.stop_event = threading.Event()
         self._lock_handle = None
@@ -110,17 +133,72 @@ class Watcher(threading.Thread):
             self.prepare.stop()
             self.prepare.join(timeout=5)
 
+    def _effective_settings(self, conn, creds: dict) -> Settings:
+        """Settings for this poll: live host config plus the sparse
+        ``settings_json`` overlay (written by the dashboard UI) over the
+        startup settings.
+
+        Re-read on every poll so a Settings → Plugins edit or a one-tap page
+        action applies on the next tick without restarting the watcher. The
+        overlay only carries the specific keys the UI changed, so a later
+        Settings → Plugins edit to any other key still lands. The linked Plex
+        account's username (and display title, when it differs) authorizes the
+        account owner when no allowed users are configured; pure
+        ``policy.evaluate()`` keeps its strict empty-allowlist contract, so the
+        fallback lives here only.
+        """
+        base = self.settings.as_dict()
+        try:
+            base.update(models.plugin_settings(models.load_hermes_config()))
+        except Exception:  # noqa: BLE001 - a config read glitch must not kill the poll
+            pass
+        raw = store.get_state(conn, "settings_json", "") or ""
+        try:
+            overlay = json.loads(raw) or {}
+        except ValueError:
+            overlay = {}
+        if isinstance(overlay, dict):
+            base.update(overlay)
+        effective = Settings.from_dict(base)
+        if not effective.allowed_user_ids:
+            names: list[str] = []
+            for value in (creds.get("username"), creds.get("account_title")):
+                if value and value not in names:
+                    names.append(value)
+            if names:
+                effective.allowed_user_ids = names
+        return effective
+
     def _poll_once(self, conn, creds: dict) -> float:
+        effective = self._effective_settings(conn, creds)
+        self.machine.settings = effective
         client = PlexClient(
             creds["base_url"], creds["token"], creds.get("client_id", "watch-with-me"),
-            allow_loopback=self.settings.allow_loopback_plex,
+            allow_loopback=effective.allow_loopback_plex,
         )
         sessions = client.sessions()
         self._failures = 0
 
         if not self._adopted:
+            # Restart recovery: resume the claim the database remembers even
+            # when the session is absent from this snapshot (it may return on
+            # a later poll).
             self.machine.adopt(store.get_state(conn, CLAIMED_SESSION_KEY, "") or None)
             self._adopted = True
+        else:
+            # One-tap page claim (POST /session/claim) while this watcher is
+            # running: the claim lands in runtime_state, and adopting it here
+            # — every poll — is what keeps the machine from overwriting
+            # claimed=0 on the very next tick.
+            stored_claim = store.get_state(conn, CLAIMED_SESSION_KEY, "") or None
+            suppressed = store.get_state(conn, "suppressed_session", "") or None
+            if (stored_claim and stored_claim != suppressed
+                    and self.machine.claim_id != stored_claim):
+                live = next((s for s in sessions if s["session_id"] == stored_claim), None)
+                if live is not None:
+                    self.machine.adopt(stored_claim)
+                    self.machine.bases.setdefault(
+                        stored_claim, (live["offset_ms"], time.monotonic()))
 
         rating_keys = [s["rating_key"] for s in sessions]
         timeline: list[dict] = []
@@ -159,8 +237,72 @@ class Watcher(threading.Thread):
         store.set_state(conn, CLAIMED_SESSION_KEY, self.machine.claim_id or "")
         store.set_state(conn, "watcher_state", plan.watcher_state)
         self._explain_unclaimed(plan)
+        self._notify_claims(conn, plan, effective)
         self._signal_prepare(bool(sessions))
         return self.settings.poll_active_seconds if sessions else self.settings.poll_idle_seconds
+
+    def _load_notified(self, conn) -> list[tuple[str, str, str]]:
+        """The persisted (session_id, rating_key, mode) triples, newest last.
+
+        Loaded once per Watcher from SQLite so a restart does not re-notify;
+        the in-memory copy is the fast path for the rest of the process life.
+        """
+        if self._notified is not None:
+            return self._notified
+        keys: list[tuple[str, str, str]] = []
+        raw = store.get_state(conn, NOTIFIED_CLAIMS_KEY, "") or ""
+        try:
+            data = json.loads(raw) or []
+        except ValueError:
+            data = []
+        if isinstance(data, list):
+            for entry in data[-NOTIFIED_CLAIMS_MAX:]:
+                if isinstance(entry, (list, tuple)) and len(entry) == 3:
+                    keys.append((str(entry[0]), str(entry[1]), str(entry[2])))
+        self._notified = keys
+        return keys
+
+    def _persist_notified(self, conn, keys: list[tuple[str, str, str]]) -> None:
+        self._notified = keys
+        store.set_state(conn, NOTIFIED_CLAIMS_KEY,
+                        json.dumps([list(key) for key in keys]))
+
+    def _notify_claims(self, conn, plan, settings: Settings) -> None:
+        """The chat handoff: one notification per (session_id, rating_key, mode).
+
+        "claimed" fires when the machine newly owns a stream; "ask" fires when
+        an eligible stream sits unclaimed under session_start == "ask" and the
+        viewer may want to start it from chat. The note count is read from the
+        store because the claiming poll itself has not loaded a timeline yet.
+        A triple is recorded (and persisted, bounded) ONLY when the callback
+        reports delivery: a denied injection or a raising gateway stays
+        eligible, so enabling the feature later retries instead of having been
+        permanently swallowed, and a watcher restart never double-notifies.
+        """
+        if self.notify is None or not settings.chat_notifications:
+            return
+        notified = self._load_notified(conn)
+        ask_mode = settings.session_start == "ask"
+        for row in plan.rows:
+            if row["claimed"]:
+                mode = "claimed"
+                notes_count = len(store.timeline_for(conn, row["rating_key"]))
+            elif ask_mode and row["state"] == "candidate":
+                mode = "ask"
+                notes_count = 0
+            else:
+                continue
+            key = (row["session_id"], row["rating_key"], mode)
+            if key in notified:
+                continue
+            try:
+                delivered = bool(self.notify(row, notes_count, mode))
+            except Exception:  # noqa: BLE001 - a refused message must not kill the poll
+                log.exception("watch-with-me: chat notification failed")
+                continue
+            if delivered:
+                notified.append(key)
+                self._persist_notified(conn, notified[-NOTIFIED_CLAIMS_MAX:])
 
     def _signal_prepare(self, playing: bool) -> None:
         """Preparation only runs while nothing plays; a session that just

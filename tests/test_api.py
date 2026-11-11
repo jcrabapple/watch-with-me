@@ -38,6 +38,10 @@ def test_page_carries_a_strict_csp(api):
     assert "default-src 'none'" in csp
     assert "script-src 'self'" in csp
     assert "unsafe-inline" not in csp
+    # The Hermes dashboard frames this page in its sidebar tab; external sites
+    # stay blocked.
+    assert "frame-ancestors 'self'" in csp
+    assert "frame-ancestors 'none'" not in csp
     assert response.headers["x-content-type-options"] == "nosniff"
     assert "app.js" in response.text
 
@@ -254,6 +258,8 @@ def patch_link_flow(monkeypatch, verify=None, hold: threading.Event | None = Non
                             "readiness": {"sampled": 10, "with_sidecar": 9,
                                           "items": [], "note": "9 of 10 — fine."},
                         }))
+    monkeypatch.setattr(onboarding_mod, "fetch_account_identity",
+                        lambda tok, cid: {"username": "", "title": ""})
 
 
 def test_setup_endpoint_unlinked(api, tmp_path, monkeypatch):
@@ -436,6 +442,57 @@ def test_setup_payload_carries_download_consent_block(api, tmp_path, monkeypatch
     assert FLOW_TOKEN not in str(body)
 
 
+def test_setup_linked_payload_carries_the_companion_url(api, tmp_path, monkeypatch):
+    import json as json_mod
+    from watch_with_me import companion as companion_mod
+
+    monkeypatch.setattr(store, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(companion_mod, "lan_ipv4", lambda: "192.168.1.67")
+    onboarding_mod.save_credentials(
+        base_url="http://192.168.1.20:32400", token=FLOW_TOKEN, client_id="cid-9",
+        server_name="NAS", machine_id="mach-1",
+        path=tmp_path / "plex-credentials.json")
+
+    class StubClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def library_sections(self):
+            return [{"title": "Movies"}, {"title": "TV Shows"}]
+
+        def recently_added(self, limit=10):
+            return []
+
+        def metadata(self, rating_key):
+            return {}
+
+    module, client = api
+    monkeypatch.setattr(module, "PlexClient", StubClient)
+    body = client.get("/api/plugins/watch-with-me/setup").json()
+    assert body["linked"] is True
+    # The phone/LAN link resolves from the request's scheme/port plus the
+    # detected LAN IPv4.
+    assert body["server"]["companion_url"] == \
+        "http://192.168.1.67:80/api/plugins/watch-with-me/app"
+
+    # A public_base_url override (Settings → Plugins) wins verbatim.
+    store.set_state(module._conn, "settings_json",
+                    json_mod.dumps({"public_base_url": "https://wwm.example.test/"}))
+    body = client.get("/api/plugins/watch-with-me/setup").json()
+    assert body["server"]["companion_url"] == \
+        "https://wwm.example.test/api/plugins/watch-with-me/app"
+
+
+def test_setup_unlinked_payload_shape_is_unchanged_by_the_companion_url(api,
+                                                                        tmp_path,
+                                                                        monkeypatch):
+    monkeypatch.setattr(store, "data_dir", lambda: tmp_path)
+    _, client = api
+    body = client.get("/api/plugins/watch-with-me/setup").json()
+    assert body == {"linked": False, "link": "https://plex.tv/link",
+                    "phase": "idle", "code": None, "server": None, "error": None}
+
+
 def test_setup_subtitles_download_per_item_action(api, tmp_path, monkeypatch):
     """The per-item action is itself the consent: it attaches one subtitle
     even though the automatic setting is off (its default)."""
@@ -495,3 +552,198 @@ def test_setup_subtitles_download_requires_rating_key(api, tmp_path, monkeypatch
     response = client.post("/api/plugins/watch-with-me/setup/subtitles/download",
                            json={})
     assert response.status_code == 400
+
+
+# -- one-tap "Watch this stream" & the mode switcher ---------------------------------
+
+import json as _json  # noqa: E402
+
+
+def _seed_observed_session(conn, session_id="sess-1", user="jcrabapple", player="Chrome",
+                           machine="aa8-com-plexapp-android", state="paused",
+                           degraded="player_not_allowed"):
+    store.upsert_session(conn, {
+        "session_id": session_id, "rating_key": "77", "state": state, "claimed": 0,
+        "claimed_at": None, "player_machine_identifier": machine,
+        "player_title": player, "user_title": user, "location": "lan",
+        "offset_ms": 1000, "base_offset_ms": 1000, "base_at_monotonic": None,
+        "started_at": 1, "last_seen_at": 2, "muted": 0,
+        "degraded_reason": degraded, "disconnect_reason": None,
+        "rebase_threshold_ms": 15000,
+    })
+
+
+def test_session_claim_marks_live_and_authorizes_user_and_player(api):
+    module, client = api
+    conn = module._conn
+    _seed_observed_session(conn)
+    store.set_state(conn, "settings_json",
+                    _json.dumps({"allowed_player_ids": ["Living Room TV"]}))
+    store.set_state(conn, "suppressed_session", "sess-1")
+
+    response = client.post("/api/plugins/watch-with-me/session/claim", json={})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "session_id": "sess-1"}
+
+    row = conn.execute("SELECT * FROM session WHERE session_id='sess-1'").fetchone()
+    assert row["claimed"] == 1
+    assert row["state"] == "live"
+    assert row["degraded_reason"] is None
+    assert store.get_state(conn, "claimed_session") == "sess-1"
+    assert store.get_state(conn, "suppressed_session") == ""
+
+    overlay = _json.loads(store.get_state(conn, "settings_json"))
+    assert overlay["allowed_user_ids"] == ["jcrabapple"]
+    assert "Chrome" in overlay["allowed_player_ids"]
+    assert "Living Room TV" in overlay["allowed_player_ids"]
+
+
+def test_session_claim_leaves_an_empty_player_allowlist_empty(api):
+    module, client = api
+    conn = module._conn
+    _seed_observed_session(conn)
+    store.set_state(conn, "settings_json", _json.dumps({}))
+
+    response = client.post("/api/plugins/watch-with-me/session/claim", json={})
+    assert response.status_code == 200
+
+    overlay = _json.loads(store.get_state(conn, "settings_json"))
+    assert overlay["allowed_user_ids"] == ["jcrabapple"]
+    assert "allowed_player_ids" not in overlay  # empty list means any player
+
+
+def test_session_claim_does_not_duplicate_known_user(api):
+    module, client = api
+    conn = module._conn
+    _seed_observed_session(conn)
+    store.set_state(conn, "settings_json",
+                    _json.dumps({"allowed_user_ids": ["jcrabapple"]}))
+
+    response = client.post("/api/plugins/watch-with-me/session/claim", json={})
+    assert response.status_code == 200
+    overlay = _json.loads(store.get_state(conn, "settings_json"))
+    assert overlay["allowed_user_ids"] == ["jcrabapple"]
+
+
+def test_session_claim_409_without_a_session(api):
+    _, client = api
+    response = client.post("/api/plugins/watch-with-me/session/claim", json={})
+    assert response.status_code == 409
+
+
+def test_session_claim_ignores_an_ended_session(api):
+    module, client = api
+    conn = module._conn
+    _seed_observed_session(conn, state="ended")
+    response = client.post("/api/plugins/watch-with-me/session/claim",
+                           json={"session_id": "sess-1"})
+    assert response.status_code == 409
+
+
+def test_settings_mode_validates_values_and_persists(api):
+    module, client = api
+    conn = module._conn
+    assert client.post("/api/plugins/watch-with-me/settings/mode",
+                       json={"note_display": "nope"}).status_code == 400
+    assert client.post("/api/plugins/watch-with-me/settings/mode",
+                       json={"rewatch": "yes"}).status_code == 400
+    assert client.post("/api/plugins/watch-with-me/settings/mode",
+                       json={"prepare_depth": "deep"}).status_code == 400
+
+    response = client.post("/api/plugins/watch-with-me/settings/mode",
+                           json={"note_display": "pause", "rewatch": True,
+                                 "prepare_depth": "queue"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["note_display"] == "pause"
+    assert body["rewatch"] is True
+    assert body["prepare_depth"] == "queue"
+
+    overlay = _json.loads(store.get_state(conn, "settings_json"))
+    assert overlay["note_display"] == "pause"
+    assert overlay["rewatch"] is True
+    assert overlay["prepare_depth"] == "queue"
+    # the pending-count endpoint reports the new mode on its next poll
+    assert client.get("/api/plugins/watch-with-me/notes/pending/count").json()["note_display"] == "pause"
+
+
+def test_setup_flow_persists_and_exposes_the_linked_username(api, tmp_path, monkeypatch):
+    import threading as threading_mod
+
+    monkeypatch.setattr(store, "data_dir", lambda: tmp_path)
+    _, client = api
+    hold = threading_mod.Event()
+    patch_link_flow(monkeypatch, hold=hold)
+    monkeypatch.setattr(onboarding_mod, "fetch_account_identity",
+                        lambda tok, cid: {"username": "jcrabapple", "title": "Jason"})
+
+    client.post("/api/plugins/watch-with-me/setup/pin")
+    hold.set()
+    body = wait_for_payload(client, "done")
+    assert body["server"]["username"] == "jcrabapple"
+    assert body["server"]["account_title"] == "Jason"
+
+    creds = _json.loads((tmp_path / "plex-credentials.json").read_text("utf-8"))
+    assert creds["username"] == "jcrabapple"
+    assert creds["account_title"] == "Jason"
+    assert FLOW_TOKEN not in _json.dumps(body)
+
+
+# -- chat handoff state (review F3) ---------------------------------------------------
+
+
+def test_settings_payload_surfaces_chat_handoff_state(api, monkeypatch):
+    module, client = api
+    body = client.get("/api/plugins/watch-with-me/settings").json()
+    assert body["chat"] == {"notifications_enabled": False,
+                            "gateway_injection_allowed": False}
+
+    config = {"plugins": {"entries": {"watch-with-me": {
+        "allow_gateway_injection": True,
+        "settings": {"chat_notifications": True}}}}}
+    monkeypatch.setattr(module.models, "load_hermes_config", lambda: config)
+    body = client.get("/api/plugins/watch-with-me/settings").json()
+    assert body["chat"] == {"notifications_enabled": True,
+                            "gateway_injection_allowed": True}
+
+
+# -- linked-server readiness cache (review F9) ----------------------------------------
+
+
+def test_setup_linked_server_readiness_is_cached_for_sixty_seconds(api, tmp_path,
+                                                                   monkeypatch):
+    """The dashboard tab no longer re-probes Plex (~11 requests) on every
+    poll: _linked_server is cached and invalidated by the mutating
+    endpoints."""
+    monkeypatch.setattr(store, "data_dir", lambda: tmp_path)
+    onboarding_mod.save_credentials(
+        base_url="http://192.168.1.20:32400", token=FLOW_TOKEN, client_id="cid-9",
+        server_name="NAS", machine_id="mach-1",
+        path=tmp_path / "plex-credentials.json")
+
+    module, client = api
+    calls: list[int] = []
+
+    class CountingClient:
+        def __init__(self, *args, **kwargs):
+            calls.append(1)
+
+        def library_sections(self):
+            return [{"title": "Movies"}]
+
+        def recently_added(self, limit=10):
+            return []
+
+        def metadata(self, rating_key):
+            return {}
+
+    monkeypatch.setattr(module, "PlexClient", CountingClient)
+
+    client.get("/api/plugins/watch-with-me/setup")
+    client.get("/api/plugins/watch-with-me/setup")
+    assert len(calls) == 1  # the second read is served from the cache
+
+    module._invalidate_linked_cache()
+    client.get("/api/plugins/watch-with-me/setup")
+    assert len(calls) == 2

@@ -27,15 +27,19 @@ from watch_with_me import onboarding  # noqa: E402
 from watch_with_me import projectionist  # noqa: E402
 from watch_with_me import queue_prep  # noqa: E402
 from watch_with_me import subtitles  # noqa: E402
+from watch_with_me.companion import companion_url  # noqa: E402
 from watch_with_me.config import DOWNLOAD_SUBTITLES_HELP, Settings  # noqa: E402
 from watch_with_me.plex import PlexClient, PlexError  # noqa: E402
 
 router = APIRouter()
 
+# frame-ancestors 'self': the Hermes dashboard (same origin) embeds
+# /api/plugins/watch-with-me/app in its sidebar tab iframe; external sites
+# remain blocked.
 CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; "
     "img-src 'self' http: https: data:; connect-src 'self' ws: wss:; "
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
 )
 
 _conn = None
@@ -52,11 +56,13 @@ def _db():
 
 
 def _settings() -> Settings:
-    raw = store.get_state(_db(), "settings_json", "") or ""
-    try:
-        return Settings.from_dict(json.loads(raw))
-    except ValueError:
-        return Settings()
+    """Effective settings: plugin defaults, overridden by the LIVE host
+    config (a Settings → Plugins edit lands without a restart), overridden by
+    the sparse ``settings_json`` overlay (one-tap page actions)."""
+    base = Settings().as_dict()
+    base.update(models.live_plugin_settings())
+    base.update(_settings_overlay(_db()))
+    return Settings.from_dict(base)
 
 
 def _session_payload(session: dict | None) -> dict:
@@ -209,6 +215,112 @@ async def messages(after_id: str = "", limit: int = 40) -> JSONResponse:
 # call returns the notes delivered since the last reveal and marks them read.
 
 NOTE_DISPLAY_MODES = ("live", "pause", "both")
+PREPARE_DEPTHS = ("off", "next", "two", "queue")
+
+
+def _settings_overlay(conn) -> dict:
+    """The mutable settings dict persisted in runtime_state (``settings_json``)."""
+    raw = store.get_state(conn, "settings_json", "") or ""
+    try:
+        data = json.loads(raw) or {}
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_settings_overlay(conn, data: dict) -> None:
+    store.set_state(conn, "settings_json", json.dumps(data))
+
+
+@router.post("/session/claim")
+async def session_claim(request: Request) -> JSONResponse:
+    """One-tap "Watch this stream": claim the observed session and authorize it.
+
+    Marks the session live/claimed, clears any suppression, and appends the
+    session's user and player to ``allowed_user_ids`` / ``allowed_player_ids``
+    in ``settings_json`` so the next stream on that device auto-claims.
+    """
+    try:
+        body = json.loads(await request.body() or b"{}") or {}
+    except ValueError:
+        body = {}
+    session_id = str(body.get("session_id") or "").strip()
+    conn = _db()
+    if session_id:
+        row = conn.execute("SELECT * FROM session WHERE session_id=?",
+                           (session_id,)).fetchone()
+        session = dict(row) if row else None
+    else:
+        session = store.latest_session(conn)
+    if not session or session.get("state") == "ended":
+        raise HTTPException(status_code=409, detail="no active session to claim")
+    with conn:
+        conn.execute(
+            "UPDATE session SET claimed=1, state='live', degraded_reason=NULL, "
+            "claimed_at=? WHERE session_id=?",
+            (int(time.time()), session["session_id"]))
+    store.set_state(conn, "suppressed_session", "")
+    store.set_state(conn, "claimed_session", session["session_id"])
+
+    overlay = _settings_overlay(conn)
+    changed = False
+    user = session.get("user_title") or ""
+    users = list(overlay.get("allowed_user_ids") or [])
+    if user and user not in users:
+        users.append(user)
+        overlay["allowed_user_ids"] = users
+        changed = True
+    from watch_with_me.policy import _player_allowed  # noqa: PLC0415 - same package
+    players = list(overlay.get("allowed_player_ids") or [])
+    if players and not _player_allowed(session, players):
+        addition = session.get("player_title") or session.get("player_machine_identifier") or ""
+        if addition and addition not in players:
+            players.append(addition)
+            overlay["allowed_player_ids"] = players
+            changed = True
+    if changed:
+        _save_settings_overlay(conn, overlay)
+    return JSONResponse({"ok": True, "session_id": session["session_id"]})
+
+
+@router.post("/settings/mode")
+async def settings_mode(request: Request) -> JSONResponse:
+    """The Setup drawer's one-tap mode switcher.
+
+    Accepts ``{"note_display": "live"|"pause"|"both"}`` plus optional
+    ``{"rewatch": bool, "prepare_depth": "off"|"next"|"two"|"queue"}`` and
+    persists the values into ``settings_json``, which the watcher re-reads on
+    its next poll, so the change lands without a restart.
+    """
+    try:
+        body = json.loads(await request.body() or b"{}") or {}
+    except ValueError:
+        body = {}
+    note_display = body.get("note_display")
+    if note_display is not None and note_display not in NOTE_DISPLAY_MODES:
+        raise HTTPException(status_code=400, detail="invalid note_display")
+    rewatch = body.get("rewatch")
+    if rewatch is not None and not isinstance(rewatch, bool):
+        raise HTTPException(status_code=400, detail="invalid rewatch")
+    prepare_depth = body.get("prepare_depth")
+    if prepare_depth is not None and prepare_depth not in PREPARE_DEPTHS:
+        raise HTTPException(status_code=400, detail="invalid prepare_depth")
+
+    conn = _db()
+    overlay = _settings_overlay(conn)
+    if note_display is not None:
+        overlay["note_display"] = note_display
+    if rewatch is not None:
+        overlay["rewatch"] = rewatch
+    if prepare_depth is not None:
+        overlay["prepare_depth"] = prepare_depth
+    _save_settings_overlay(conn, overlay)
+    applied = {"note_display": overlay.get("note_display", _settings().note_display)}
+    if "rewatch" in overlay:
+        applied["rewatch"] = overlay["rewatch"]
+    if "prepare_depth" in overlay:
+        applied["prepare_depth"] = overlay["prepare_depth"]
+    return JSONResponse({"ok": True, **applied})
 
 
 def _note_display() -> str:
@@ -456,7 +568,13 @@ async def settings() -> JSONResponse:
     The ``jev`` block is masked entity-selection state: whether the optional
     decision-model feature is on, which provider it resolves to, and at most
     the key's last four characters. The key itself never appears here (or in
-    any payload, log, or config file)."""
+    any payload, log, or config file).
+
+    The ``chat`` block is the session-handoff state: whether chat
+    notifications are enabled, and whether the host currently allows gateway
+    injection. ``allow_gateway_injection`` is a host-side plugin-entry flag,
+    not a plugin setting — the plugin surfaces it (and the exact config.yaml
+    fix) but cannot grant itself the capability."""
     payload = models.status_payload()
     current = _settings()
     status = jev.key_status()
@@ -465,6 +583,11 @@ async def settings() -> JSONResponse:
         "provider": current.jev_provider or "auto",
         "configured": status["configured"],
         "last4": status["last4"],
+    }
+    payload["chat"] = {
+        "notifications_enabled": bool(current.chat_notifications),
+        "gateway_injection_allowed":
+            models.gateway_injection_allowed(models.load_hermes_config()),
     }
     return JSONResponse(payload)
 
@@ -560,15 +683,20 @@ def _link_worker(cancel: threading.Event) -> None:
         server = choice["server"]
         _setup_flow["server"] = {"name": server["name"], "access": server["access"]}
         verified = onboarding.verify_server(choice["uri"], token, client_id)
+        identity = onboarding.fetch_account_identity(token, client_id)
+        username = identity["username"] or identity["title"]
         onboarding.save_credentials(
             base_url=choice["uri"], token=token, client_id=client_id,
-            server_name=server["name"], machine_id=server["machine_id"])
+            server_name=server["name"], machine_id=server["machine_id"],
+            username=username, account_title=identity["title"])
         _setup_flow.update(phase="done", error=None, code=None, server={
             "name": server["name"],
             "machine_id": server["machine_id"],
             "access": server["access"],
             "connection": choice["uri"],
             "relay_fallback": choice["relay_fallback"],
+            "username": username,
+            "account_title": identity["title"] or username,
             "library_count": verified["library_count"],
             "library_names": verified["library_names"],
             "readiness": {"sampled": verified["readiness"]["sampled"],
@@ -596,6 +724,7 @@ def _linked_server(creds: dict) -> dict:
         "access": "your server",
         "connection": creds.get("base_url") or "",
         "relay_fallback": False,
+        "username": creds.get("username") or "",
         "library_count": None,
         "library_names": [],
         "readiness": None,
@@ -616,6 +745,30 @@ def _linked_server(creds: dict) -> dict:
     return {"server": server, "error": error}
 
 
+#: The dashboard sidebar tab polls /setup; without a cache every poll would
+#: re-probe Plex (~11 requests: sections + ten item metadata fetches). The
+#: readiness sample is cached for LINKED_CACHE_TTL seconds and invalidated by
+#: anything that can change what it reports (relink, per-item download).
+LINKED_CACHE_TTL = 60.0
+_linked_cache: dict = {"at": 0.0, "payload": None, "creds_key": ""}
+
+
+def _invalidate_linked_cache() -> None:
+    _linked_cache["payload"] = None
+
+
+def _linked_server_cached(creds: dict) -> dict:
+    key = f'{creds.get("base_url") or ""}|{creds.get("machine_id") or ""}'
+    now = time.monotonic()
+    cached = _linked_cache["payload"]
+    if (cached is not None and _linked_cache["creds_key"] == key
+            and now - _linked_cache["at"] < LINKED_CACHE_TTL):
+        return cached
+    payload = _linked_server(creds)
+    _linked_cache.update(at=now, payload=payload, creds_key=key)
+    return payload
+
+
 def _download_state() -> dict:
     """The subtitle-download consent block shown next to the per-item action."""
     settings = subtitles.load_settings(_db())
@@ -627,7 +780,7 @@ def _download_state() -> dict:
     }
 
 
-def _setup_payload() -> dict:
+def _setup_payload(request: Request | None = None) -> dict:
     creds = onboarding.load_credentials()
     payload = {"linked": bool(creds), "link": onboarding.LINK_URL,
                "code": None, "server": None, "error": None}
@@ -647,35 +800,40 @@ def _setup_payload() -> dict:
             payload["server"] = flow_server
             payload["error"] = None
         else:
-            linked = _linked_server(creds)
+            linked = _linked_server_cached(creds)
             payload["server"] = linked["server"]
             payload["error"] = linked["error"]
+        # The phone/LAN link is only meaningful once linked, so it lives
+        # inside the server block: the unlinked payload keeps its exact
+        # historic shape (test_setup_endpoint_unlinked asserts equality).
+        payload["server"]["companion_url"] = companion_url(request, _settings())
     return payload
 
 
 @router.get("/setup")
-async def setup() -> JSONResponse:
-    return JSONResponse(_setup_payload())
+async def setup(request: Request) -> JSONResponse:
+    return JSONResponse(_setup_payload(request))
 
 
 @router.post("/setup/pin")
-async def setup_pin() -> JSONResponse:
+async def setup_pin(request: Request) -> JSONResponse:
     with _setup_lock:
         if _flow_active():
-            return JSONResponse(_setup_payload(), status_code=200)
+            return JSONResponse(_setup_payload(request), status_code=200)
+        _invalidate_linked_cache()
         _setup_flow.clear()
         _setup_flow.update({"phase": "awaiting_link", "code": None, "server": None,
                             "error": None, "cancel": threading.Event()})
         cancel = _setup_flow["cancel"]
     threading.Thread(target=_link_worker, args=(cancel,),
                      name="watch-with-me-link", daemon=True).start()
-    return JSONResponse(_setup_payload())
+    return JSONResponse(_setup_payload(request))
 
 
 @router.post("/setup/relink")
-async def setup_relink() -> JSONResponse:
+async def setup_relink(request: Request) -> JSONResponse:
     """Replace the stored token: same flow as the first link."""
-    return await setup_pin()
+    return await setup_pin(request)
 
 
 @router.post("/setup/cancel")
@@ -702,6 +860,7 @@ async def setup_subtitles_download(request: Request) -> JSONResponse:
     creds = onboarding.load_credentials()
     if not creds:
         raise HTTPException(status_code=409, detail="Plex is not linked yet")
+    _invalidate_linked_cache()  # the readiness sample changes per item
     conn = _db()
     settings = subtitles.load_settings(conn)
     languages = body.get("languages") or settings.subtitle_languages or ["en"]

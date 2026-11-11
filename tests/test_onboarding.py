@@ -203,6 +203,49 @@ def test_probe_reraises_401_so_the_flow_can_say_relink():
 
 # -- storage ---------------------------------------------------------------------
 
+def test_fetch_account_user_returns_username_with_token_header():
+    fake = FakeTransport({"https://plex.tv/api/v2/user": {"username": "jcrabapple",
+                                                          "title": "Jason"}})
+    assert onboarding.fetch_account_user(TOKEN, "cid-1", transport=fake) == "jcrabapple"
+    call = fake.calls[0]
+    assert call["method"] == "GET"
+    assert call["headers"]["X-Plex-Token"] == TOKEN
+    assert call["headers"]["X-Plex-Client-Identifier"] == "cid-1"
+
+
+def test_fetch_account_user_falls_back_to_title():
+    fake = FakeTransport({"https://plex.tv/api/v2/user": {"title": "Jason C"}})
+    assert onboarding.fetch_account_user(TOKEN, "cid-1", transport=fake) == "Jason C"
+
+
+def test_fetch_account_user_never_raises_and_never_leaks_the_token():
+    failing = FakeTransport({"https://plex.tv/api/v2/user": unauthorized})
+    assert onboarding.fetch_account_user(TOKEN, "cid-1", transport=failing) == ""
+    empty = FakeTransport({"https://plex.tv/api/v2/user": {}})
+    assert onboarding.fetch_account_user(TOKEN, "cid-1", transport=empty) == ""
+    # an unrouted request is swallowed too (never raises)
+    assert onboarding.fetch_account_user(TOKEN, "cid-1",
+                                         transport=FakeTransport({})) == ""
+
+
+def test_fetch_account_identity_captures_username_and_title():
+    fake = FakeTransport({"https://plex.tv/api/v2/user": {"username": "jcrabapple",
+                                                          "title": "Jason"}})
+    identity = onboarding.fetch_account_identity(TOKEN, "cid-1", transport=fake)
+    assert identity == {"username": "jcrabapple", "title": "Jason"}
+    call = fake.calls[0]
+    assert call["headers"]["X-Plex-Token"] == TOKEN
+
+
+def test_fetch_account_identity_never_raises():
+    failing = FakeTransport({"https://plex.tv/api/v2/user": unauthorized})
+    assert onboarding.fetch_account_identity(TOKEN, "cid-1", transport=failing) == \
+        {"username": "", "title": ""}
+    assert onboarding.fetch_account_identity(TOKEN, "cid-1",
+                                             transport=FakeTransport({})) == \
+        {"username": "", "title": ""}
+
+
 def test_save_credentials_writes_shape_and_mode(tmp_path):
     path = tmp_path / "sub" / "plex-credentials.json"
     onboarding.save_credentials(base_url="http://192.168.1.20:32400", token=TOKEN,
@@ -216,6 +259,37 @@ def test_save_credentials_writes_shape_and_mode(tmp_path):
                     "machine_id": "mach-1"}
     # round-trip through the loader
     assert onboarding.load_credentials(path=path) == body
+
+
+def test_save_credentials_persists_username_only_when_provided(tmp_path):
+    path = tmp_path / "plex-credentials.json"
+    onboarding.save_credentials(base_url="http://192.168.1.20:32400", token=TOKEN,
+                                client_id="cid-1", username="jcrabapple", path=path)
+    body = json.loads(path.read_text("utf-8"))
+    assert body["username"] == "jcrabapple"
+    # and empty (the default) keeps the file byte-shape older versions wrote
+    plain = tmp_path / "plain.json"
+    onboarding.save_credentials(base_url="http://192.168.1.20:32400", token=TOKEN,
+                                client_id="cid-1", path=plain)
+    assert "username" not in json.loads(plain.read_text("utf-8"))
+
+
+def test_save_credentials_persists_a_differing_account_title(tmp_path):
+    """Plex Home: sessions report User.title, which can differ from the
+    account username — both are persisted so either one authorizes."""
+    path = tmp_path / "plex-credentials.json"
+    onboarding.save_credentials(base_url="http://192.168.1.20:32400", token=TOKEN,
+                                client_id="cid-1", username="jcrabapple",
+                                account_title="Jason", path=path)
+    body = json.loads(path.read_text("utf-8"))
+    assert body["username"] == "jcrabapple"
+    assert body["account_title"] == "Jason"
+    # a title equal to the username adds nothing (the file keeps its shape)
+    same = tmp_path / "same.json"
+    onboarding.save_credentials(base_url="http://192.168.1.20:32400", token=TOKEN,
+                                client_id="cid-1", username="jason",
+                                account_title="jason", path=same)
+    assert "account_title" not in json.loads(same.read_text("utf-8"))
 
 
 def test_load_credentials_missing_or_corrupt(tmp_path, caplog):
@@ -406,6 +480,7 @@ def _patch_cli_flow(monkeypatch, verify):
     monkeypatch.setattr(onboarding, "probe_connection",
                         lambda uri, tok, cid, **kw: "192.168." in uri)
     monkeypatch.setattr(onboarding, "verify_server", verify)
+    monkeypatch.setattr(onboarding, "fetch_account_user", lambda tok, cid: "")
 
 
 def test_watch_setup_cli_prints_code_link_and_verification(tmp_path, monkeypatch):
@@ -448,3 +523,26 @@ def test_watch_setup_cli_401_returns_relink_message(tmp_path, monkeypatch):
     text = plugin._setup()
     assert text == onboarding.RELINK_MESSAGE
     assert not (tmp_path / "plex-credentials.json").exists()
+
+
+def test_watch_setup_cli_persists_the_linked_username(tmp_path, monkeypatch):
+    from watch_with_me import plugin
+
+    monkeypatch.setattr(store, "data_dir", lambda: tmp_path)
+
+    def verify(uri, tok, cid, **kw):
+        return {"library_count": 1, "library_names": ["Movies"],
+                "readiness": {"sampled": 1, "with_sidecar": 1, "items": [],
+                              "note": "All 1 sampled titles have sidecar subtitles — "
+                                      "full pipeline ready."}}
+
+    _patch_cli_flow(monkeypatch, verify)
+    monkeypatch.setattr(onboarding, "fetch_account_identity",
+                        lambda tok, cid: {"username": "jcrabapple", "title": "Jason"})
+    text = plugin._setup()
+
+    assert "Linked as jcrabapple." in text
+    assert TOKEN not in text
+    creds = json.loads((tmp_path / "plex-credentials.json").read_text("utf-8"))
+    assert creds["username"] == "jcrabapple"
+    assert creds["account_title"] == "Jason"
